@@ -1,5 +1,4 @@
 import os
-import time
 
 import cv2 as cv
 import numpy as np
@@ -25,7 +24,7 @@ class Main:
     }
     THRESH = {"TEMP_SKILL": 0.8, "WHITE": 175, "NOFILL": 150, "WIGGLE": 500}
 
-    err = [15.8, 15.8, 1]
+    err = [15.8, 15.8, 1, 1]
     wait, pix_count = False, 0
     ang_white, ang_red, ang_space, pix_count = None, None, None, None
 
@@ -33,6 +32,9 @@ class Main:
     def __init__(self):
         os.chdir(os.path.dirname(__file__))
         self.hwnd = util.get_hwnd(self.GAME_TITLE)
+        if self.hwnd is None:
+            print("{} not found. Please start the game first.".format(self.GAME_TITLE))
+            exit()
         win_rect = win32gui.GetWindowRect(self.hwnd)
         self.res_i = util.check_res(self.RES, win_rect)
         if not isinstance(self.res_i, int):
@@ -63,20 +65,12 @@ class Main:
 
     # Destructor
     def __del__(self):
-        win32gui.DeleteObject(self.pen)
-        self.dcObj.DeleteDC()
-        self.cDC.DeleteDC()
-        win32gui.ReleaseDC(self.hwnd, self.wDC)
-        win32gui.DeleteObject(self.dataBitMap.GetHandle())
-
-    def rw_overlap(self):
-        if self.pix_count > self.THRESH["WIGGLE"] or self.ang_white is None:
-            return (
-                min(abs(self.ang_red), abs(util.ang_diff(self.ang_red - 180)))
-                < self.err[0]
-            )
-        else:
-            return abs(util.ang_diff(self.ang_red - self.ang_white)) < self.err[0]
+        if self.hwnd is not None:
+            win32gui.DeleteObject(self.pen)
+            self.dcObj.DeleteDC()
+            self.cDC.DeleteDC()
+            win32gui.ReleaseDC(self.hwnd, self.wDC)
+            win32gui.DeleteObject(self.dataBitMap.GetHandle())
 
     def skill_check(self):
         self.cDC.BitBlt(
@@ -95,11 +89,10 @@ class Main:
         min_val, max_val, min_loc, max_loc = cv.minMaxLoc(result)
 
         if max_val > self.THRESH["TEMP_SKILL"]:
-            img = cv.bitwise_and(img, img, mask=self.mask_skill).T
+            img = util.extract("img", img, self.mask_skill)
             if self.pix_count is None:
-                white = cv.threshold(
-                    np.average(img, axis=0), self.THRESH["WHITE"], 255, cv.THRESH_BINARY
-                )[1].astype("uint8")
+                white = util.extract("white", img, self.THRESH["WHITE"])
+                self.ang_white = util.get_angle(white)
                 self.pix_count = np.count_nonzero(white)
                 if self.THRESH["NOFILL"] < self.pix_count < self.THRESH["WIGGLE"]:
                     contr, _ = cv.findContours(
@@ -109,51 +102,44 @@ class Main:
                     cv.drawContours(solid, contr, -1, 255, 2)
                     solid = cv.subtract(white, solid)
                     self.ang_white = util.get_angle(solid)
-            red = cv.subtract(img[2], cv.add(img[0], img[1]))
+                elif util.is_wiggle(white, self.err, self.THRESH["WIGGLE"]):
+                    white = None
+                    self.ang_white = None
+
+            red = util.extract("red", img)
             self.ang_red = util.get_angle(red)
-
-            if self.THRESH["NOFILL"] < self.pix_count < self.THRESH["WIGGLE"]:
-                if not self.wait and self.rw_overlap():
-                    util.press_space()
-                    self.wait = True
+            if self.wait:
+                if self.ang_white is None:
+                    self.wait = util.rw_overlap(self.ang_white, self.ang_red, self.err)
+                elif self.pix_count < self.THRESH["NOFILL"]:
+                    w2 = util.extract("white", img, self.THRESH["WHITE"])
+                    ang_w2 = util.get_angle(white)
+                    if abs(util.ang_diff(self.ang_white - ang_w2)) > self.err[0]:
+                        white, self.ang_white, self.wait = w2, ang_w2, False
+            elif util.rw_overlap(self.ang_white, self.ang_red, self.err):
+                util.press_space()
+                self.wait = True
+                if self.pix_count > self.THRESH["NOFILL"]:
                     self.ang_space = self.ang_red
-            else:
-                if self.pix_count < self.THRESH["NOFILL"]:
-                    white = cv.threshold(
-                        np.average(img, axis=0),
-                        self.THRESH["WHITE"],
-                        255,
-                        cv.THRESH_BINARY,
-                    )[1].astype("uint8")
-                    self.ang_white = util.get_angle(white)
-                if self.wait:
-                    self.wait = self.rw_overlap()
-                elif self.rw_overlap():
-                    util.press_space()
-                    self.wait = True
-
             if self.FLAGS["SAVE_IMG"]:
                 self.dataBitMap.SaveBitmapFile(
                     self.cDC, self.PATH["IMG_FORMAT"].format(self.img_i)
                 )
                 self.img_i += 1
         else:
-            if not (
-                self.ang_space is None or self.ang_red is None or self.ang_white is None
-            ):
+            if not (self.ang_space is None or self.ang_white is None):
                 diff_key = util.ang_diff(self.ang_red - self.ang_space)
                 diff_red = util.ang_diff(self.ang_white - self.ang_red)
                 if diff_key * diff_red < 0:
                     util.mov_avg(self.err, self.err[0] + abs(diff_red))
                 elif diff_key * diff_red > 0:
                     util.mov_avg(self.err, self.err[0] - abs(diff_red))
-                # print(self.err, diff_red, diff_key)
 
             self.pix_count, self.wait = None, False
             self.ang_white, self.ang_red, self.ang_space = None, None, None
 
     def draw_skill_check(self):
-        cx, cy, r1, r2 = 960, 525, 50, 60
+        cx, cy, r1, r2 = 960, 525, 53, 58
         if self.ang_white is not None:
             util.draw_line(self.wDC, cx, cy, r1, r2, self.ang_white)
         if self.ang_space is not None:
